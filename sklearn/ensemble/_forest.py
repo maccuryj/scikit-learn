@@ -2329,3 +2329,105 @@ class RandomTreesEmbedding(BaseForest):
         """
         check_is_fitted(self)
         return self.one_hot_encoder_.transform(self.apply(X))
+
+class UnsupervisedRandomForest(ForestClassifier):
+    def __init__(self,
+                    n_estimators=100,
+                    criterion="gini",
+                    max_depth=None,
+                    min_samples_split=2,
+                    min_samples_leaf=1,
+                    min_weight_fraction_leaf=0.,
+                    max_features="auto",
+                    max_leaf_nodes=None,
+                    min_impurity_decrease=0.,
+                    min_impurity_split=None,
+                    bootstrap=True,
+                    oob_score=False,
+                    n_jobs=None,
+                    random_state=None,
+                    verbose=0,
+                    warm_start=False,
+                    class_weight=None,
+                    ccp_alpha=0.0,
+                    max_samples=None):
+        super().__init__(
+            base_estimator=DecisionTreeClassifier(),
+            n_estimators=n_estimators,
+            estimator_params=("criterion", "max_depth", "min_samples_split",
+                                "min_samples_leaf", "min_weight_fraction_leaf",
+                                "max_features", "max_leaf_nodes",
+                                "min_impurity_decrease", "min_impurity_split",
+                                "random_state", "ccp_alpha"),
+            bootstrap=bootstrap,
+            oob_score=oob_score,
+            n_jobs=n_jobs,
+            random_state=random_state,
+            verbose=verbose,
+            warm_start=warm_start,
+            class_weight=class_weight,
+            max_samples=max_samples)
+
+        self.criterion = criterion
+        self.max_depth = max_depth
+        self.min_samples_split = min_samples_split
+        self.min_samples_leaf = min_samples_leaf
+        self.min_weight_fraction_leaf = min_weight_fraction_leaf
+        self.max_features = max_features
+        self.max_leaf_nodes = max_leaf_nodes
+        self.min_impurity_decrease = min_impurity_decrease
+        self.min_impurity_split = min_impurity_split
+        self.ccp_alpha = ccp_alpha
+
+    def _sample_synthetic(self, X):
+        """
+        Create synthetic data of the same shape as X
+        Synthetic data points are created by sampling from
+        univariate distributions of features across X
+        """
+        n_samples = X.shape[0]
+        self.y = np.concatenate((np.ones(n_samples), np.zeros(n_samples)))
+        
+        random_state = _forest.check_random_state(self.random_state)        
+
+        X_synth = np.asarray([np.apply_along_axis(random_state.choice, 0, X) for _ in range(n_samples)])
+        self.X = np.concatenate((X, X_synth))
+
+        return self.X, self.y
+
+    def fit(self, X):
+        """
+        Forest of trees is created and fit according to
+        concatenated original and synthetic data
+
+        Args:
+            X (np.array(2D)): Original data without labels
+        """
+        self.n_classes_ = 2
+        self.n_features_ = X.shape[1]
+
+        X, y = self._sample_synthetic(X)
+        return BaseForest.fit(self, X, y)
+
+    def create_proximity(self,):
+        """
+        Create proximity matrix by processing data points with every single estimator
+        and computing how often data point pairs land in the same leaf
+
+        """
+        _forest.check_is_fitted(self)
+        # Check data
+        self.X = self._validate_X_predict(self.X)
+
+        # Assign chunk of trees to jobs
+        n_jobs, _, _ = _forest._partition_estimators(self.n_estimators, self.n_jobs)
+
+        # avoid storing the output of every estimator by summing them here
+        proximity_matrix = np.zeros((self.X.shape[0], self.X.shape[0]), dtype=np.int16)
+
+        lock = threading.Lock()
+        Parallel(n_jobs=n_jobs, verbose=self.verbose,
+                 **_joblib_parallel_args(require="sharedmem"))(
+                delayed(_accumulate_prox)(e, self.X, proximity_matrix,
+                                            lock)
+            for e in self.estimators_)
